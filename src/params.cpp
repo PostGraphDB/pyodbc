@@ -1408,6 +1408,61 @@ bool Prepare(Cursor* cur, PyObject* pSql)
     return true;
 }
 
+
+bool Bind(Cursor* cur, PyObject* original_params, bool skip_first)
+{
+    //
+    // Normalize the parameter variables.
+    //
+
+    // Since we may replace parameters (we replace objects with Py_True/Py_False when writing to a bit/bool column),
+    // allocate an array and use it instead of the original sequence
+
+    int        params_offset = skip_first ? 1 : 0;
+    Py_ssize_t cParams       = original_params == 0 ? 0 : PySequence_Length(original_params) - params_offset;
+    if (cParams != cur->paramcount)
+    {
+        RaiseErrorV(0, ProgrammingError, "The SQL contains %d parameter markers, but %d parameters were supplied",
+                    cur->paramcount, cParams);
+        return false;
+    }
+
+    cur->paramInfos = (ParamInfo*)PyMem_Malloc(sizeof(ParamInfo) * cParams);
+    if (cur->paramInfos == 0)
+    {
+        PyErr_NoMemory();
+        return 0;
+    }
+    memset(cur->paramInfos, 0, sizeof(ParamInfo) * cParams);
+
+    // Since you can't call SQLDesribeParam *after* calling SQLBindParameter, we'll loop through all of the
+    // GetParameterInfos first, then bind.
+
+    for (Py_ssize_t i = 0; i < cParams; i++)
+    {
+        Object param(PySequence_GetItem(original_params, i + params_offset));
+        if (!GetParameterInfo(cur, i, param, cur->paramInfos[i], false))
+        {
+            FreeInfos(cur->paramInfos, cParams);
+            cur->paramInfos = 0;
+            return false;
+        }
+    }
+
+    for (Py_ssize_t i = 0; i < cParams; i++)
+    {
+        if (!BindParameter(cur, i, cur->paramInfos[i]))
+        {
+            FreeInfos(cur->paramInfos, cParams);
+            cur->paramInfos = 0;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 bool PrepareAndBind(Cursor* cur, PyObject* pSql, PyObject* original_params, bool skip_first)
 {
     //

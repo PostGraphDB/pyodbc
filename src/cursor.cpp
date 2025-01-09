@@ -72,7 +72,7 @@ static Cursor* Cursor_Validate(PyObject* obj, DWORD flags)
     if (cnxn == 0)
     {
         if (flags & CURSOR_RAISE_ERROR)
-            PyErr_SetString(ProgrammingError, "Attempt to use a closed cursor.");
+            PyErr_SetString(ProgrammingError, "Attempt to use a closed cursor. here");
         return 0;
     }
 
@@ -81,7 +81,7 @@ static Cursor* Cursor_Validate(PyObject* obj, DWORD flags)
         if (cursor->hstmt == SQL_NULL_HANDLE)
         {
             if (flags & CURSOR_RAISE_ERROR)
-                PyErr_SetString(ProgrammingError, "Attempt to use a closed cursor.");
+                PyErr_SetString(ProgrammingError, "Attempt to use a closed cursor. there");
             return 0;
         }
 
@@ -347,7 +347,9 @@ static bool free_results(Cursor* self, int flags)
         if ((flags & STATEMENT_MASK) == FREE_STATEMENT)
         {
             Py_BEGIN_ALLOW_THREADS
-            SQLFreeStmt(self->hstmt, SQL_CLOSE);
+            //SQLFreeStmt(self->hstmt, SQL_CLOSE);
+            SQLFreeStmt(self->hstmt, SQL_UNBIND);
+            SQLFreeStmt(self->hstmt, SQL_RESET_PARAMS);
             Py_END_ALLOW_THREADS;
         }
         else
@@ -396,7 +398,7 @@ static void closeimpl(Cursor* cur)
     // An internal function for the shared 'closing' code used by Cursor_close and Cursor_dealloc.
     //
     // This method releases the GIL lock while closing, so verify the HDBC still exists if you use it.
-
+/*
     free_results(cur, FREE_STATEMENT | FREE_PREPARED);
 
     FreeParameterData(cur);
@@ -428,6 +430,7 @@ static void closeimpl(Cursor* cur)
     cur->map_name_to_index = 0;
     cur->cnxn = 0;
     cur->messages = 0;
+*/
 }
 
 static char close_doc[] =
@@ -678,6 +681,310 @@ int GetDiagRecs(Cursor* cur)
 
     return 0;
 }
+
+
+static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* params, bool skip_first)
+{
+   // Internal function to execute SQL, called by .execute and .executemany.
+    //
+    // pSql
+    //   A PyString, PyUnicode, or derived object containing the SQL.
+    //
+    // params
+    //   Pointer to an optional sequence of parameters, and possibly the SQL statement (see skip_first):
+    //   (SQL, param1, param2) or (param1, param2).
+    //
+    // skip_first
+    //   If true, the first element in `params` is ignored.  (It will be the SQL statement and `params` will be the
+    //   entire tuple passed to Cursor.execute.)  Otherwise all of the params are used.  (This case occurs when called
+    //   from Cursor.executemany, in which case the sequences do not contain the SQL statement.)  Ignored if params is
+    //   zero.
+
+    if (params)
+    {
+        if (!PyTuple_Check(params) && !PyList_Check(params) && !Row_Check(params))
+            return RaiseErrorV(0, PyExc_TypeError, "Params must be in a list, tuple, or Row");
+    }
+
+    // Normalize the parameter variables.
+
+    int        params_offset = skip_first ? 1 : 0;
+    Py_ssize_t cParams       = params == 0 ? 0 : PySequence_Length(params) - params_offset;
+
+    SQLRETURN ret = 0;
+
+    free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
+
+    const char* szLastFunction = "";
+
+
+        if (!Prepare(cur, pSql, params, skip_first))
+            return 0;
+
+     
+
+    Py_INCREF(cur);
+    return (PyObject*)cur;
+
+
+    //return NULL;
+    // Internal function to prepare SQL, called by .prepare
+    //
+    // pSql
+    //   A PyString, PyUnicode, or derived object containing the SQL.
+    //
+    // skip_first
+    //   If true, the first element in `params` is ignored.  (It will be the SQL statement and `params` will be the
+    //   entire tuple passed to Cursor.execute.)  Otherwise all of the params are used.  (This case occurs when called
+    //   from Cursor.executemany, in which case the sequences do not contain the SQL statement.)  Ignored if params is
+    //   zero.
+
+    // Normalize the parameter variables.
+    //free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
+//Prepare(NULL, NULL);
+    //SQLRETURN ret = 0;
+   // Prepare(cur, pSql);//))
+        //return 0;
+    //return ret;
+    //return cur->hstmt;
+}
+
+
+static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool skip_first)
+{
+
+    if (params)
+    {
+        if (!PyTuple_Check(params) && !PyList_Check(params) && !Row_Check(params))
+            return RaiseErrorV(0, PyExc_TypeError, "Params must be in a list, tuple, or Row");
+    }
+
+    // Normalize the parameter variables.
+
+    int        params_offset = skip_first ? 1 : 0;
+    Py_ssize_t cParams       = params == 0 ? 0 : PySequence_Length(params) - params_offset;
+
+    SQLRETURN ret = 0;
+
+    //free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
+
+    const char* szLastFunction = "";
+
+        if (!Bind(cur, params, skip_first))
+            return 0;
+
+        szLastFunction = "SQLExecute";
+        Py_BEGIN_ALLOW_THREADS
+        ret = SQLExecute(cur->hstmt);
+        Py_END_ALLOW_THREADS
+   
+
+    if (cur->cnxn->hdbc == SQL_NULL_HANDLE)
+    {
+        // The connection was closed by another thread in the ALLOW_THREADS block above.
+
+        FreeParameterData(cur);
+        return RaiseErrorV(0, ProgrammingError, "The cursor's connection was closed.");
+    }
+
+    if (!SQL_SUCCEEDED(ret) && ret != SQL_NEED_DATA && ret != SQL_NO_DATA)
+    {
+        // We could try dropping through the while and if below, but if there is an error, we need to raise it before
+        // FreeParameterData calls more ODBC functions.
+        RaiseErrorFromHandle(cur->cnxn, "SQLExecDirectW", cur->cnxn->hdbc, cur->hstmt);
+        FreeParameterData(cur);
+        return 0;
+    }
+
+    if (ret == SQL_SUCCESS_WITH_INFO)
+    {
+        GetDiagRecs(cur);
+    }
+
+    while (ret == SQL_NEED_DATA)
+    {
+        // One or more parameters were too long to bind normally so we set the
+        // length to SQL_LEN_DATA_AT_EXEC.  ODBC will return SQL_NEED_DATA for
+        // each of the parameters we did this for.
+        //
+        // For each one we set a pointer to the ParamInfo as the "parameter
+        // data" we can access with SQLParamData.  We've stashed everything we
+        // need in there.
+
+        szLastFunction = "SQLParamData";
+        ParamInfo* pInfo;
+        Py_BEGIN_ALLOW_THREADS
+        ret = SQLParamData(cur->hstmt, (SQLPOINTER*)&pInfo);
+        Py_END_ALLOW_THREADS
+
+        if (ret != SQL_NEED_DATA && ret != SQL_NO_DATA && !SQL_SUCCEEDED(ret))
+            return RaiseErrorFromHandle(cur->cnxn, "SQLParamData", cur->cnxn->hdbc, cur->hstmt);
+
+        TRACE("SQLParamData() --> %d\n", ret);
+
+        if (ret == SQL_NEED_DATA)
+        {
+            szLastFunction = "SQLPutData";
+            if (pInfo->pObject && (PyBytes_Check(pInfo->pObject) || PyByteArray_Check(pInfo->pObject)
+            ))
+            {
+                char *(*pGetPtr)(PyObject*);
+                Py_ssize_t (*pGetLen)(PyObject*);
+                if (PyByteArray_Check(pInfo->pObject))
+                {
+                    pGetPtr = PyByteArray_AsString;
+                    pGetLen = PyByteArray_Size;
+                }
+                else
+                {
+                    pGetPtr = PyBytes_AsString;
+                    pGetLen = PyBytes_Size;
+                }
+
+                const char* p = pGetPtr(pInfo->pObject);
+                SQLLEN cb = (SQLLEN)pGetLen(pInfo->pObject);
+                SQLLEN offset = 0;
+
+                do
+                {
+                    SQLLEN remaining = pInfo->maxlength ? min(pInfo->maxlength, cb - offset) : cb;
+                    TRACE("SQLPutData [%d] (%d) %.10s\n", offset, remaining, &p[offset]);
+                    Py_BEGIN_ALLOW_THREADS
+                    ret = SQLPutData(cur->hstmt, (SQLPOINTER)&p[offset], remaining);
+                    Py_END_ALLOW_THREADS
+                    if (!SQL_SUCCEEDED(ret))
+                        return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+                    offset += remaining;
+                }
+                while (offset < cb);
+            }
+            else if (pInfo->ParameterType == SQL_SS_TABLE)
+            {
+                // TVP
+                // Need to convert its columns into the bound row buffers
+                int hasTvpRows = 0;
+                if (pInfo->curTvpRow < PySequence_Length(pInfo->pObject))
+                {
+                    PyObject *tvpRow = PySequence_GetItem(pInfo->pObject, pInfo->curTvpRow);
+                    Py_XDECREF(tvpRow);
+                    for (Py_ssize_t i = 0; i < PySequence_Size(tvpRow); i++)
+                    {
+                        struct ParamInfo newParam;
+                        struct ParamInfo *prevParam = pInfo->nested + i;
+                        PyObject *cell = PySequence_GetItem(tvpRow, i);
+                        Py_XDECREF(cell);
+                        memset(&newParam, 0, sizeof(newParam));
+                        if (!GetParameterInfo(cur, i, cell, newParam, true))
+                        {
+                            // Error converting object
+                            FreeParameterData(cur);
+                            return NULL;
+                        }
+
+                        if((newParam.ValueType != SQL_C_DEFAULT && prevParam->ValueType != SQL_C_DEFAULT) &&
+                           (newParam.ValueType != prevParam->ValueType ||
+                            newParam.ParameterType != prevParam->ParameterType))
+                        {
+                            FreeParameterData(cur);
+                            return RaiseErrorV(0, ProgrammingError, "Type mismatch between TVP row values");
+                        }
+
+                        if (prevParam->allocated)
+                            PyMem_Free(prevParam->ParameterValuePtr);
+                        Py_XDECREF(prevParam->pObject);
+                        newParam.BufferLength = newParam.StrLen_or_Ind;
+                        newParam.StrLen_or_Ind = SQL_DATA_AT_EXEC;
+                        *prevParam = newParam;
+                        if(prevParam->ParameterValuePtr == &newParam.Data)
+                        {
+                            prevParam->ParameterValuePtr = &prevParam->Data;
+                        }
+                    }
+                    pInfo->curTvpRow++;
+                    hasTvpRows = 1;
+                }
+                Py_BEGIN_ALLOW_THREADS
+                ret = SQLPutData(cur->hstmt, hasTvpRows ? (SQLPOINTER)1 : 0, hasTvpRows);
+                Py_END_ALLOW_THREADS
+                if (!SQL_SUCCEEDED(ret))
+                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+            }
+            else
+            {
+                // TVP column sent as DAE
+                Py_BEGIN_ALLOW_THREADS
+                ret = SQLPutData(cur->hstmt, pInfo->ParameterValuePtr, pInfo->BufferLength);
+                Py_END_ALLOW_THREADS
+                if (!SQL_SUCCEEDED(ret))
+                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+            }
+            ret = SQL_NEED_DATA;
+        }
+    }
+
+    FreeParameterData(cur);
+
+    if (ret == SQL_NO_DATA)
+    {
+        // Example: A delete statement that did not delete anything.
+        cur->rowcount = 0;
+        Py_INCREF(cur);
+        return (PyObject*)cur;
+    }
+
+    if (!SQL_SUCCEEDED(ret))
+        return RaiseErrorFromHandle(cur->cnxn, szLastFunction, cur->cnxn->hdbc, cur->hstmt);
+
+    SQLLEN cRows = -1;
+    Py_BEGIN_ALLOW_THREADS
+    ret = SQLRowCount(cur->hstmt, &cRows);
+    Py_END_ALLOW_THREADS
+    if (!SQL_SUCCEEDED(ret))
+        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, cur->hstmt);
+
+    cur->rowcount = (int)cRows;
+
+    TRACE("SQLRowCount: %d\n", cRows);
+
+    SQLSMALLINT cCols = 0;
+    Py_BEGIN_ALLOW_THREADS
+    ret = SQLNumResultCols(cur->hstmt, &cCols);
+    Py_END_ALLOW_THREADS
+    if (!SQL_SUCCEEDED(ret))
+    {
+        // Note: The SQL Server driver sometimes returns HY007 here if multiple statements (separated by ;) were
+        // submitted.  This is not documented, but I've seen it with multiple successful inserts.
+
+        return RaiseErrorFromHandle(cur->cnxn, "SQLNumResultCols", cur->cnxn->hdbc, cur->hstmt);
+    }
+
+    TRACE("SQLNumResultCols: %d\n", cCols);
+
+    if (cur->cnxn->hdbc == SQL_NULL_HANDLE)
+    {
+        // The connection was closed by another thread in the ALLOW_THREADS block above.
+        return RaiseErrorV(0, ProgrammingError, "The cursor's connection was closed.");
+    }
+
+    if (!SQL_SUCCEEDED(ret))
+        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, cur->hstmt);
+
+    if (cCols != 0)
+    {
+        // A result set was created.
+
+        if (!PrepareResults(cur, cCols))
+            return 0;
+
+        if (!create_name_map(cur, cCols, lowercase()))
+            return 0;
+    }
+
+    Py_INCREF(cur);
+    return (PyObject*)cur;    
+}
+
+
 
 
 static PyObject* execute(Cursor* cur, PyObject* pSql, PyObject* params, bool skip_first)
@@ -974,6 +1281,116 @@ inline bool IsSequence(PyObject* p)
 }
 
 
+
+static char prepare_statement_doc[] =
+    "C.prepare_statement(sql) --> Cursor\n"
+    "\n"
+    "Prepare a database query or command.\n";
+PyObject* Cursor_prepare_statement(PyObject* self, PyObject* args)
+{
+   Py_ssize_t cParams = PyTuple_Size(args) - 1;
+
+    Cursor* cursor = Cursor_Validate(self, CURSOR_REQUIRE_OPEN | CURSOR_RAISE_ERROR);
+    if (!cursor)
+        return 0;
+
+    if (cParams < 0)
+    {
+        PyErr_SetString(PyExc_TypeError, "execute() takes at least 1 argument (0 given)");
+        return 0;
+    }
+
+    PyObject* pSql = PyTuple_GET_ITEM(args, 0);
+
+    if (!PyUnicode_Check(pSql) && !PyUnicode_Check(pSql))
+    {
+        PyErr_SetString(PyExc_TypeError, "The first argument to execute must be a string or unicode query.");
+        return 0;
+    }
+
+    // Figure out if there were parameters and how they were passed.  Our optional parameter passing complicates this slightly.
+
+    bool skip_first = false;
+    PyObject *params = 0;
+    if (cParams == 1 && IsSequence(PyTuple_GET_ITEM(args, 1)))
+    {
+        // There is a single argument and it is a sequence, so we must treat it as a sequence of parameters.  (This is
+        // the normal Cursor.execute behavior.)
+
+        params     = PyTuple_GET_ITEM(args, 1);
+        skip_first = false;
+    }
+    else if (cParams > 0)
+    {
+        params     = args;
+        skip_first = true;
+    }
+
+    // Execute.
+    return prepare_statement(cursor, pSql, params, skip_first);
+    //return (PyObject *)cursor;//execute(cursor, pSql, params, skip_first);
+}    
+
+   
+static char executePreparedStatement_doc[] =
+    "C.execute(sql, [params]) --> Cursor\n"
+    "\n"
+    "Prepare and execute a database query or command.\n"
+    "\n"
+    "Parameters may be provided as a sequence (as specified by the DB API) or\n"
+    "simply passed in one after another (non-standard):\n"
+    "\n"
+    "  cursor.execute(sql, (param1, param2))\n"
+    "\n"
+    "    or\n"
+    "\n"
+    "  cursor.execute(sql, param1, param2)\n";
+PyObject* Cursor_executePreparedStatement(PyObject* self, PyObject* args)
+{
+    Py_ssize_t cParams = PyTuple_Size(args) - 1;
+
+    Cursor* cursor = Cursor_Validate(self, CURSOR_REQUIRE_OPEN | CURSOR_RAISE_ERROR);
+    if (!cursor)
+        return 0;
+
+    if (cParams < 0)
+    {
+        PyErr_SetString(PyExc_TypeError, "execute() takes at least 1 argument (0 given)");
+        return 0;
+    }
+/*
+TODO: Leave the first argument slot open for the handle. Handle to be implemented later
+    PyObject* pSql = PyTuple_GET_ITEM(args, 0);
+
+    if (!PyUnicode_Check(pSql) && !PyUnicode_Check(pSql))
+    {
+        PyErr_SetString(PyExc_TypeError, "The first argument to execute must be a string or unicode query.");
+        return 0;
+    }*/
+
+    // Figure out if there were parameters and how they were passed.  Our optional parameter passing complicates this slightly.
+
+    bool skip_first = false;
+    PyObject *params = 0;
+    if (cParams == 1 && IsSequence(PyTuple_GET_ITEM(args, 1)))
+    {
+        // There is a single argument and it is a sequence, so we must treat it as a sequence of parameters.  (This is
+        // the normal Cursor.execute behavior.)
+
+        params     = PyTuple_GET_ITEM(args, 1);
+        skip_first = false;
+    }
+    else if (cParams > 0)
+    {
+        params     = args;
+        skip_first = true;
+    }
+
+    // Execute.
+
+    return executePreparedStatement(cursor, params, skip_first);
+}
+
 static char execute_doc[] =
     "C.execute(sql, [params]) --> Cursor\n"
     "\n"
@@ -987,7 +1404,6 @@ static char execute_doc[] =
     "    or\n"
     "\n"
     "  cursor.execute(sql, param1, param2)\n";
-
 PyObject* Cursor_execute(PyObject* self, PyObject* args)
 {
     Py_ssize_t cParams = PyTuple_Size(args) - 1;
@@ -2388,6 +2804,7 @@ static PyMethodDef Cursor_methods[] =
     { "close",            (PyCFunction)Cursor_close,            METH_NOARGS,                close_doc            },
     { "execute",          (PyCFunction)Cursor_execute,          METH_VARARGS,               execute_doc          },
     { "executemany",      (PyCFunction)Cursor_executemany,      METH_VARARGS,               executemany_doc      },
+    { "executePreparedStatement", (PyCFunction)Cursor_executePreparedStatement, METH_VARARGS, executePreparedStatement_doc },
     { "setinputsizes",    (PyCFunction)Cursor_setinputsizes,    METH_O,                     setinputsizes_doc    },
     { "setoutputsize",    (PyCFunction)Cursor_ignored,          METH_VARARGS,               ignored_doc          },
     { "fetchval",         (PyCFunction)Cursor_fetchval,         METH_NOARGS,                fetchval_doc         },
@@ -2403,6 +2820,7 @@ static PyMethodDef Cursor_methods[] =
     { "primaryKeys",      (PyCFunction)Cursor_primaryKeys,      METH_VARARGS|METH_KEYWORDS, primaryKeys_doc      },
     { "foreignKeys",      (PyCFunction)Cursor_foreignKeys,      METH_VARARGS|METH_KEYWORDS, foreignKeys_doc      },
     { "getTypeInfo",      (PyCFunction)Cursor_getTypeInfo,      METH_VARARGS|METH_KEYWORDS, getTypeInfo_doc      },
+    { "prepareStatement", (PyCFunction)Cursor_prepare_statement,METH_VARARGS,               prepare_statement_doc},
     { "procedures",       (PyCFunction)Cursor_procedures,       METH_VARARGS|METH_KEYWORDS, procedures_doc       },
     { "procedureColumns", (PyCFunction)Cursor_procedureColumns, METH_VARARGS|METH_KEYWORDS, procedureColumns_doc },
     { "skip",             (PyCFunction)Cursor_skip,             METH_VARARGS,               skip_doc             },

@@ -62,3 +62,6 @@ xxx_*
 # The Access unit tests copy empty.accdb and empty.mdb to these names and use them.
 test.accdb
 test.mdb
+
+.flake8
+.github/workflows/*

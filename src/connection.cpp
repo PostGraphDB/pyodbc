@@ -162,7 +162,7 @@ static bool ApplyPreconnAttrs(HDBC hdbc, SQLINTEGER ikey, PyObject *value, char 
     {
         RaiseErrorFromHandle(0, "SQLSetConnectAttr", hdbc, SQL_NULL_HANDLE);
         Py_BEGIN_ALLOW_THREADS
-        SQLFreeHandle(SQL_HANDLE_DBC, hdbc);
+        //SQLFreeHandle(SQL_HANDLE_DBC, hdbc);
         Py_END_ALLOW_THREADS
         return false;
     }
