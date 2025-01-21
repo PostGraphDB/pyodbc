@@ -1353,7 +1353,7 @@ bool Prepare(Cursor* cur, PyObject* pSql)
     //
     // Prepare the SQL if necessary.
     //
-    if (pSql != cur->pPreparedSQL)
+    //if (pSql != cur->pPreparedSQL)
     {
         FreeParameterInfo(cur);
 

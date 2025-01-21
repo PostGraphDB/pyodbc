@@ -325,7 +325,7 @@ static bool free_results(Cursor* self, int flags)
     // this even when a query has not been executed.
 
     // If we ran out of memory, it is possible that we have a cursor but colinfos is zero.  However, we should be
-    // deleting this object, so the cursor will be freed when the HSTMT is destroyed. */
+    // deleting this object, so the cursor will be freed when the HSTMT is destroyed.
 
     assert((flags & STATEMENT_MASK) != 0);
     assert((flags & PREPARED_MASK) != 0);
@@ -347,7 +347,7 @@ static bool free_results(Cursor* self, int flags)
         if ((flags & STATEMENT_MASK) == FREE_STATEMENT)
         {
             Py_BEGIN_ALLOW_THREADS
-            //SQLFreeStmt(self->hstmt, SQL_CLOSE);
+            SQLFreeStmt(self->hstmt, SQL_CLOSE);
             SQLFreeStmt(self->hstmt, SQL_UNBIND);
             SQLFreeStmt(self->hstmt, SQL_RESET_PARAMS);
             Py_END_ALLOW_THREADS;
@@ -398,7 +398,7 @@ static void closeimpl(Cursor* cur)
     // An internal function for the shared 'closing' code used by Cursor_close and Cursor_dealloc.
     //
     // This method releases the GIL lock while closing, so verify the HDBC still exists if you use it.
-/*
+
     free_results(cur, FREE_STATEMENT | FREE_PREPARED);
 
     FreeParameterData(cur);
@@ -430,7 +430,7 @@ static void closeimpl(Cursor* cur)
     cur->map_name_to_index = 0;
     cur->cnxn = 0;
     cur->messages = 0;
-*/
+
 }
 
 static char close_doc[] =
@@ -682,23 +682,13 @@ int GetDiagRecs(Cursor* cur)
     return 0;
 }
 
-
+static bool first_prepare = false;
 static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* params, bool skip_first)
 {
-   // Internal function to execute SQL, called by .execute and .executemany.
+   // Internal function to execute SQL, called by .prepareStatement
     //
     // pSql
     //   A PyString, PyUnicode, or derived object containing the SQL.
-    //
-    // params
-    //   Pointer to an optional sequence of parameters, and possibly the SQL statement (see skip_first):
-    //   (SQL, param1, param2) or (param1, param2).
-    //
-    // skip_first
-    //   If true, the first element in `params` is ignored.  (It will be the SQL statement and `params` will be the
-    //   entire tuple passed to Cursor.execute.)  Otherwise all of the params are used.  (This case occurs when called
-    //   from Cursor.executemany, in which case the sequences do not contain the SQL statement.)  Ignored if params is
-    //   zero.
 
     if (params)
     {
@@ -713,40 +703,18 @@ static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* param
 
     SQLRETURN ret = 0;
 
-    free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
+    //free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
 
     const char* szLastFunction = "";
 
+    if (!Prepare(cur, pSql))
+    {
+        return 0;
+    }
 
-        if (!Prepare(cur, pSql, params, skip_first))
-            return 0;
-
-     
-
+    first_prepare = true;
     Py_INCREF(cur);
     return (PyObject*)cur;
-
-
-    //return NULL;
-    // Internal function to prepare SQL, called by .prepare
-    //
-    // pSql
-    //   A PyString, PyUnicode, or derived object containing the SQL.
-    //
-    // skip_first
-    //   If true, the first element in `params` is ignored.  (It will be the SQL statement and `params` will be the
-    //   entire tuple passed to Cursor.execute.)  Otherwise all of the params are used.  (This case occurs when called
-    //   from Cursor.executemany, in which case the sequences do not contain the SQL statement.)  Ignored if params is
-    //   zero.
-
-    // Normalize the parameter variables.
-    //free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
-//Prepare(NULL, NULL);
-    //SQLRETURN ret = 0;
-   // Prepare(cur, pSql);//))
-        //return 0;
-    //return ret;
-    //return cur->hstmt;
 }
 
 
@@ -766,17 +734,26 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
 
     SQLRETURN ret = 0;
 
-    //free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
-
+         FreeParameterData(cur);
+    
+	 SQLCancelHandle(SQL_HANDLE_STMT, cur->hstmt);
+    /*if (first_prepare) {
+        //SQLFreeStmt(cur->hstmt, SQL_CLOSE);
+    	//SQLFreeStmt(cur->hstmt, SQL_UNBIND);
+    	//SQLFreeStmt(cur->hstmt, SQL_RESET_PARAMS);
+        first_prepare = false;
+    } else {
+	SQLCancelHandle(SQL_HANDLE_DBC, cur->hstmt);
+    }*/
     const char* szLastFunction = "";
 
-        if (!Bind(cur, params, skip_first))
-            return 0;
+    if (!Bind(cur, params, skip_first))
+       return 0;
 
-        szLastFunction = "SQLExecute";
-        Py_BEGIN_ALLOW_THREADS
-        ret = SQLExecute(cur->hstmt);
-        Py_END_ALLOW_THREADS
+    szLastFunction = "SQLExecute";
+    Py_BEGIN_ALLOW_THREADS
+    ret = SQLExecute(cur->hstmt);
+    Py_END_ALLOW_THREADS
    
 
     if (cur->cnxn->hdbc == SQL_NULL_HANDLE)
@@ -984,9 +961,6 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
     return (PyObject*)cur;    
 }
 
-
-
-
 static PyObject* execute(Cursor* cur, PyObject* pSql, PyObject* params, bool skip_first)
 {
     // Internal function to execute SQL, called by .execute and .executemany.
@@ -1017,7 +991,7 @@ static PyObject* execute(Cursor* cur, PyObject* pSql, PyObject* params, bool ski
 
     SQLRETURN ret = 0;
 
-    free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
+    free_results(cur, KEEP_STATEMENT | KEEP_PREPARED);
 
     const char* szLastFunction = "";
 
