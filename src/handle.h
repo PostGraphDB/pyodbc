@@ -13,7 +13,7 @@
 #ifndef HANDLE_H
 #define HANDLE_H
 
-struct Connection;
+struct Cursor;
 
 struct Handle
 {
