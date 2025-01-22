@@ -24,6 +24,7 @@
 #include "getdata.h"
 #include "dbspecific.h"
 #include <datetime.h>
+#include "handle.h"
 
 enum
 {
@@ -682,7 +683,6 @@ int GetDiagRecs(Cursor* cur)
     return 0;
 }
 
-static bool first_prepare = false;
 static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* params, bool skip_first)
 {
    // Internal function to execute SQL, called by .prepareStatement
@@ -712,13 +712,14 @@ static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* param
         return 0;
     }
 
-    first_prepare = true;
     Py_INCREF(cur);
-    return (PyObject*)cur;
+    Handle *hndl = Handle_New(cur);
+    hndl->hstmt = cur->hstmt;
+    return (PyObject*)hndl;
 }
 
 
-static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool skip_first)
+static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* params, bool skip_first)
 {
 
     if (params)
@@ -736,15 +737,8 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
 
          FreeParameterData(cur);
     
-	 SQLCancelHandle(SQL_HANDLE_STMT, cur->hstmt);
-    /*if (first_prepare) {
-        //SQLFreeStmt(cur->hstmt, SQL_CLOSE);
-    	//SQLFreeStmt(cur->hstmt, SQL_UNBIND);
-    	//SQLFreeStmt(cur->hstmt, SQL_RESET_PARAMS);
-        first_prepare = false;
-    } else {
-	SQLCancelHandle(SQL_HANDLE_DBC, cur->hstmt);
-    }*/
+	 SQLCancelHandle(SQL_HANDLE_STMT, hndl->hstmt);
+
     const char* szLastFunction = "";
 
     if (!Bind(cur, params, skip_first))
@@ -752,7 +746,7 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
 
     szLastFunction = "SQLExecute";
     Py_BEGIN_ALLOW_THREADS
-    ret = SQLExecute(cur->hstmt);
+    ret = SQLExecute(hndl->hstmt);
     Py_END_ALLOW_THREADS
    
 
@@ -768,7 +762,7 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
     {
         // We could try dropping through the while and if below, but if there is an error, we need to raise it before
         // FreeParameterData calls more ODBC functions.
-        RaiseErrorFromHandle(cur->cnxn, "SQLExecDirectW", cur->cnxn->hdbc, cur->hstmt);
+        RaiseErrorFromHandle(cur->cnxn, "SQLExecDirectW", cur->cnxn->hdbc, hndl->hstmt);
         FreeParameterData(cur);
         return 0;
     }
@@ -791,11 +785,11 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
         szLastFunction = "SQLParamData";
         ParamInfo* pInfo;
         Py_BEGIN_ALLOW_THREADS
-        ret = SQLParamData(cur->hstmt, (SQLPOINTER*)&pInfo);
+        ret = SQLParamData(hndl->hstmt, (SQLPOINTER*)&pInfo);
         Py_END_ALLOW_THREADS
 
         if (ret != SQL_NEED_DATA && ret != SQL_NO_DATA && !SQL_SUCCEEDED(ret))
-            return RaiseErrorFromHandle(cur->cnxn, "SQLParamData", cur->cnxn->hdbc, cur->hstmt);
+            return RaiseErrorFromHandle(cur->cnxn, "SQLParamData", cur->cnxn->hdbc, hndl->hstmt);
 
         TRACE("SQLParamData() --> %d\n", ret);
 
@@ -830,7 +824,7 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
                     ret = SQLPutData(cur->hstmt, (SQLPOINTER)&p[offset], remaining);
                     Py_END_ALLOW_THREADS
                     if (!SQL_SUCCEEDED(ret))
-                        return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+                        return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, hndl->hstmt);
                     offset += remaining;
                 }
                 while (offset < cb);
@@ -881,19 +875,19 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
                     hasTvpRows = 1;
                 }
                 Py_BEGIN_ALLOW_THREADS
-                ret = SQLPutData(cur->hstmt, hasTvpRows ? (SQLPOINTER)1 : 0, hasTvpRows);
+                ret = SQLPutData(hndl->hstmt, hasTvpRows ? (SQLPOINTER)1 : 0, hasTvpRows);
                 Py_END_ALLOW_THREADS
                 if (!SQL_SUCCEEDED(ret))
-                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, hndl->hstmt);
             }
             else
             {
                 // TVP column sent as DAE
                 Py_BEGIN_ALLOW_THREADS
-                ret = SQLPutData(cur->hstmt, pInfo->ParameterValuePtr, pInfo->BufferLength);
+                ret = SQLPutData(hndl->hstmt, pInfo->ParameterValuePtr, pInfo->BufferLength);
                 Py_END_ALLOW_THREADS
                 if (!SQL_SUCCEEDED(ret))
-                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, cur->hstmt);
+                    return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, hndl->hstmt);
             }
             ret = SQL_NEED_DATA;
         }
@@ -910,14 +904,14 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
     }
 
     if (!SQL_SUCCEEDED(ret))
-        return RaiseErrorFromHandle(cur->cnxn, szLastFunction, cur->cnxn->hdbc, cur->hstmt);
+        return RaiseErrorFromHandle(cur->cnxn, szLastFunction, cur->cnxn->hdbc, hndl->hstmt);
 
     SQLLEN cRows = -1;
     Py_BEGIN_ALLOW_THREADS
-    ret = SQLRowCount(cur->hstmt, &cRows);
+    ret = SQLRowCount(hndl->hstmt, &cRows);
     Py_END_ALLOW_THREADS
     if (!SQL_SUCCEEDED(ret))
-        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, cur->hstmt);
+        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, hndl->hstmt);
 
     cur->rowcount = (int)cRows;
 
@@ -925,14 +919,14 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
 
     SQLSMALLINT cCols = 0;
     Py_BEGIN_ALLOW_THREADS
-    ret = SQLNumResultCols(cur->hstmt, &cCols);
+    ret = SQLNumResultCols(hndl->hstmt, &cCols);
     Py_END_ALLOW_THREADS
     if (!SQL_SUCCEEDED(ret))
     {
         // Note: The SQL Server driver sometimes returns HY007 here if multiple statements (separated by ;) were
         // submitted.  This is not documented, but I've seen it with multiple successful inserts.
 
-        return RaiseErrorFromHandle(cur->cnxn, "SQLNumResultCols", cur->cnxn->hdbc, cur->hstmt);
+        return RaiseErrorFromHandle(cur->cnxn, "SQLNumResultCols", cur->cnxn->hdbc, hndl->hstmt);
     }
 
     TRACE("SQLNumResultCols: %d\n", cCols);
@@ -944,7 +938,7 @@ static PyObject* executePreparedStatement(Cursor* cur, PyObject* params, bool sk
     }
 
     if (!SQL_SUCCEEDED(ret))
-        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, cur->hstmt);
+        return RaiseErrorFromHandle(cur->cnxn, "SQLRowCount", cur->cnxn->hdbc, hndl->hstmt);
 
     if (cCols != 0)
     {
@@ -1329,18 +1323,17 @@ PyObject* Cursor_executePreparedStatement(PyObject* self, PyObject* args)
 
     if (cParams < 0)
     {
-        PyErr_SetString(PyExc_TypeError, "execute() takes at least 1 argument (0 given)");
+        PyErr_SetString(PyExc_TypeError, "executePreparedStatement() takes at least 1 argument (0 given)");
         return 0;
     }
-/*
-TODO: Leave the first argument slot open for the handle. Handle to be implemented later
-    PyObject* pSql = PyTuple_GET_ITEM(args, 0);
 
-    if (!PyUnicode_Check(pSql) && !PyUnicode_Check(pSql))
+    PyObject* hndl = PyTuple_GET_ITEM(args, 0);
+
+    if (!Handle_Check(hndl))
     {
-        PyErr_SetString(PyExc_TypeError, "The first argument to execute must be a string or unicode query.");
+        PyErr_SetString(PyExc_TypeError, "The first argument to executePreparedStatement must be a query handle.");
         return 0;
-    }*/
+    }
 
     // Figure out if there were parameters and how they were passed.  Our optional parameter passing complicates this slightly.
 
@@ -1350,7 +1343,6 @@ TODO: Leave the first argument slot open for the handle. Handle to be implemente
     {
         // There is a single argument and it is a sequence, so we must treat it as a sequence of parameters.  (This is
         // the normal Cursor.execute behavior.)
-
         params     = PyTuple_GET_ITEM(args, 1);
         skip_first = false;
     }
@@ -1362,7 +1354,7 @@ TODO: Leave the first argument slot open for the handle. Handle to be implemente
 
     // Execute.
 
-    return executePreparedStatement(cursor, params, skip_first);
+    return executePreparedStatement(cursor, (Handle *)hndl, params, skip_first);
 }
 
 static char execute_doc[] =

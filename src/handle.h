@@ -29,4 +29,11 @@ struct Handle
 void Handle_init();
 
 Handle* Handle_New(Cursor* cur);
+
+extern PyTypeObject HandleType;
+
+#define Handle_Check(op) PyObject_TypeCheck(op, &HandleType)
+#define Handle_CheckExact(op) (Py_TYPE(op) == &HandleType)
+
+
 #endif

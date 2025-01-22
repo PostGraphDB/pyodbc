@@ -26,7 +26,7 @@
 #include <datetime.h>
 #include "handle.h"
 
-extern PyTypeObject HandleType;
+
 
 static char messages_doc[] =
     "This read-only attribute is a list of all the diagnostic messages in the\n" \
@@ -49,6 +49,9 @@ static PyMemberDef Cursor_members[] =
 
 
 
+
+
+
 static char enter_doc[] = "__enter__() -> self.";
 static PyObject* Handle_enter(PyObject* self, PyObject* args)
 {
@@ -57,7 +60,7 @@ static PyObject* Handle_enter(PyObject* self, PyObject* args)
     return self;
 }
 
-static char exit_doc[] = "__exit__(*excinfo) -> None.  Commits the connection if necessary..";
+static char exit_doc[] = "__exit__(*excinfo) -> None.  XXX: Commits the connection if necessary..";
 static PyObject* Handle_exit(PyObject* self, PyObject* args)
 {
     //Cursor* cursor = Cursor_Validate(self, CURSOR_REQUIRE_OPEN | CURSOR_RAISE_ERROR);
@@ -68,6 +71,13 @@ static PyObject* Handle_exit(PyObject* self, PyObject* args)
     Py_RETURN_NONE;
 }
 
+static void Handle_dealloc(Handle* hndl)
+{
+    
+    //Py_XDECREF(cursor->inputsizes);
+    PyObject_Del(hndl);
+}
+
 
 static PyMethodDef Handle_methods[] =
 {
@@ -76,9 +86,9 @@ static PyMethodDef Handle_methods[] =
     {0, 0, 0, 0}
 };
 
-static char cursor_doc[] =
+static char handle_doc[] =
     "TODO";
-PyTypeObject CursorType =
+PyTypeObject HandleType =
 {
     PyVarObject_HEAD_INIT(0, 0)
     "pyodbc.Handle",                                        // tp_name
@@ -142,7 +152,7 @@ Handle_New(Cursor* cur)
 
     if (hndl)
     {
-        Connection cnxn = cur->cnxn;
+        Connection *cnxn = cur->cnxn;
         hndl->cur              = cur;
         hndl->hstmt             = SQL_NULL_HANDLE;
 
