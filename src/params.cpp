@@ -24,6 +24,7 @@
 #include "row.h"
 #include <datetime.h>
 
+#include <stdio.h>
 
 inline Connection* GetConnection(Cursor* cursor)
 {
@@ -280,6 +281,7 @@ static int PyToCType(Cursor *cur, unsigned char **outbuf, PyObject *cell, ParamI
             pParam->cell = cell;
             pParam->maxlen = cur->cnxn->GetMaxLength(pi->ValueType);
             *outbuf += sizeof(DAEParam);
+	    //fprintf(stderr, "nzcxv\n");
             ind = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLLEN)len) : SQL_DATA_AT_EXEC;
         }
         else
@@ -319,6 +321,7 @@ static int PyToCType(Cursor *cur, unsigned char **outbuf, PyObject *cell, ParamI
             pParam->cell = encoded.Detach();
             pParam->maxlen = cur->cnxn->GetMaxLength(pi->ValueType);
             *outbuf += sizeof(DAEParam);
+	    //fprintf(stderr, "kmoj\n");
             ind = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLLEN)len) : SQL_DATA_AT_EXEC;
         }
         else
@@ -404,6 +407,7 @@ static int PyToCType(Cursor *cur, unsigned char **outbuf, PyObject *cell, ParamI
             pParam->cell = cell;
             pParam->maxlen = cur->cnxn->GetMaxLength(pi->ValueType);
             *outbuf += sizeof(DAEParam);
+	    //fprintf(stderr, "buhy\n");
             ind = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLLEN)len) : SQL_DATA_AT_EXEC;
         }
         else
@@ -577,6 +581,7 @@ static bool GetBytesInfo(Cursor* cur, Py_ssize_t index, PyObject* param, ParamIn
     {
         // Too long to pass all at once, so we'll provide the data at execute.
         info.ParameterType     = SQL_LONGVARBINARY;
+	//fprintf(stderr, "vgy\n");
         info.StrLen_or_Ind     = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLLEN)cb) : SQL_DATA_AT_EXEC;
         info.ParameterValuePtr = &info;
         info.BufferLength      = sizeof(ParamInfo*);
@@ -634,7 +639,8 @@ static bool GetUnicodeInfo(Cursor* cur, Py_ssize_t index, PyObject* param, Param
     }
     else
     {
-        // Too long to pass all at once, so we'll provide the data at execute.
+        //fprintf(stderr, "gsdhj\n");
+	// Too long to pass all at once, so we'll provide the data at execute.
         info.ParameterType     = (enc.ctype == SQL_C_CHAR) ? SQL_LONGVARCHAR : SQL_WLONGVARCHAR;
         info.ParameterValuePtr = &info;
         info.BufferLength      = sizeof(ParamInfo*);
@@ -958,6 +964,7 @@ static bool GetByteArrayInfo(Cursor* cur, Py_ssize_t index, PyObject* param, Par
         info.ParameterValuePtr = &info;
         info.BufferLength      = sizeof(ParamInfo*);
         info.ColumnSize        = (SQLUINTEGER)cb;
+	//fprintf(stderr, "trwert\n");
         info.StrLen_or_Ind     = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLLEN)cb) : SQL_DATA_AT_EXEC;
         info.pObject = param;
         Py_INCREF(info.pObject);
@@ -1157,6 +1164,170 @@ static bool UpdateParamInfo(Cursor* pCursor, Py_ssize_t nIndex, ParamInfo *pInfo
   return rc;
 }
 
+bool BindParameterWithHandle(Cursor* cur, Handle *hndl, Py_ssize_t index, ParamInfo& info)
+{
+    SQLSMALLINT sqltype = info.ParameterType;
+    SQLULEN colsize = info.ColumnSize;
+    SQLSMALLINT scale = info.DecimalDigits;
+
+    if (UpdateParamInfo(cur, index, &info))
+    {
+    // Reload in case it has changed.
+    colsize = info.ColumnSize;
+    sqltype = info.ParameterType;
+    scale = info.DecimalDigits;
+    }
+  //fprintf(stderr, "BIND: param=%ld ValueType=%d (%s) ParameterType=%d (%s) ColumnSize=%ld DecimalDigits=%d BufferLength=%ld (info.StrLen_or_Ind) *pcb=%ld\n",
+//		            (index+1), info.ValueType, CTypeName(info.ValueType), sqltype, SqlTypeName(sqltype), colsize,
+//			              scale, info.BufferLength, info.StrLen_or_Ind);
+  TRACE("BIND: param=%ld ValueType=%d (%s) ParameterType=%d (%s) ColumnSize=%ld DecimalDigits=%d BufferLength=%ld *pcb=%ld\n",
+          (index+1), info.ValueType, CTypeName(info.ValueType), sqltype, SqlTypeName(sqltype), colsize,
+          scale, info.BufferLength, info.StrLen_or_Ind);
+
+    SQLRETURN ret = -1;
+    Py_BEGIN_ALLOW_THREADS
+    ret = SQLBindParameter(hndl->hstmt, (SQLUSMALLINT)(index + 1), SQL_PARAM_INPUT,
+        info.ValueType, sqltype, colsize, scale, sqltype == SQL_SS_TABLE ? 0 : info.ParameterValuePtr, info.BufferLength, &info.StrLen_or_Ind);
+    Py_END_ALLOW_THREADS;
+
+    if (GetConnection(cur)->hdbc == SQL_NULL_HANDLE)
+    {
+        // The connection was closed by another thread in the ALLOW_THREADS block above.
+        RaiseErrorV(0, ProgrammingError, "The cursor's connection was closed.");
+        return false;
+    }
+
+    if (!SQL_SUCCEEDED(ret))
+    {
+        RaiseErrorFromHandle(cur->cnxn, "SQLBindParameter", GetConnection(cur)->hdbc, hndl->hstmt);
+        return false;
+    }
+
+    // This is a TVP. Enter and bind its parameters, allocate descriptors for its columns (all as DAE)
+    if (sqltype == SQL_SS_TABLE)
+    {
+	//fprintf(stderr, "Not a Table\n");
+        Py_ssize_t nrows = PySequence_Size(info.pObject);
+        if (nrows > 0)
+        {
+            PyObject *cell0 = PySequence_GetItem(info.pObject, 0);
+            Py_XDECREF(cell0);
+            if (PyBytes_Check(cell0) || PyUnicode_Check(cell0))
+            {
+                SQLHDESC desc;
+                PyObject *tvpname = PyCodec_Encode(cell0, "UTF-16LE", 0);
+                SQLGetStmtAttr(hndl->hstmt, SQL_ATTR_IMP_PARAM_DESC, &desc, 0, 0);
+                SQLSetDescFieldW(desc, index + 1, SQL_CA_SS_TYPE_NAME, (SQLPOINTER)PyBytes_AsString(tvpname), PyBytes_Size(tvpname));
+                Py_XDECREF(tvpname);
+
+                if (nrows > 1)
+                {
+                    PyObject *cell1 = PySequence_GetItem(info.pObject, 1);
+                    Py_XDECREF(cell1);
+                    if (PyBytes_Check(cell1) || PyUnicode_Check(cell1))
+                    {
+                        PyObject *tvpschema = PyCodec_Encode(cell1, "UTF-16LE", 0);
+                        SQLSetDescFieldW(desc, index + 1, SQL_CA_SS_SCHEMA_NAME, (SQLPOINTER)PyBytes_AsString(tvpschema), PyBytes_Size(tvpschema));
+                        Py_XDECREF(tvpschema);
+                    }
+                }
+            }
+        }
+
+        SQLHDESC desc;
+        SQLGetStmtAttr(hndl->hstmt, SQL_ATTR_APP_PARAM_DESC, &desc, 0, 0);
+        SQLSetDescField(desc, index + 1, SQL_DESC_DATA_PTR, (SQLPOINTER)info.ParameterValuePtr, 0);
+
+        int err = 0;
+        ret = SQLSetStmtAttr(hndl->hstmt, SQL_SOPT_SS_PARAM_FOCUS, (SQLPOINTER)(index + 1), SQL_IS_INTEGER);
+        if (!SQL_SUCCEEDED(ret))
+        {
+            RaiseErrorFromHandle(cur->cnxn, "SQLSetStmtAttr", GetConnection(cur)->hdbc, hndl->hstmt);
+            return false;
+        }
+
+        Py_ssize_t i = PySequence_Size(info.pObject) - info.ColumnSize;
+        Py_ssize_t ncols = 0;
+        while (i >= 0 && i < PySequence_Size(info.pObject))
+        {
+            PyObject *row = PySequence_GetItem(info.pObject, i);
+            Py_XDECREF(row);
+            if (!PySequence_Check(row))
+            {
+                RaiseErrorV(0, ProgrammingError, "A TVP's rows must be Sequence objects.");
+                err = 1;
+                break;
+            }
+            if (ncols && ncols != PySequence_Size(row))
+            {
+                RaiseErrorV(0, ProgrammingError, "A TVP's rows must all be the same size.");
+                err = 1;
+                break;
+            }
+            ncols = PySequence_Size(row);
+            i++;
+        }
+        if (!ncols)
+        {
+            // TVP has no columns --- is null
+            info.nested = 0;
+            info.StrLen_or_Ind = SQL_DEFAULT_PARAM;
+        }
+        else
+        {
+            PyObject *row = PySequence_GetItem(info.pObject, PySequence_Size(info.pObject) - info.ColumnSize);
+            Py_XDECREF(row);
+
+            info.nested = (ParamInfo*)PyMem_Malloc(ncols * sizeof(ParamInfo));
+            info.maxlength = ncols;
+            memset(info.nested, 0, ncols * sizeof(ParamInfo));
+
+            for(i=0;i<ncols;i++)
+            {
+                // Bind the TVP's columns --- all need to use DAE
+                PyObject *param = PySequence_GetItem(row, i);
+                Py_XDECREF(param);
+                GetParameterInfo(cur, i, param, info.nested[i], true);
+                info.nested[i].BufferLength = info.nested[i].StrLen_or_Ind;
+                info.nested[i].StrLen_or_Ind = SQL_DATA_AT_EXEC;
+
+                Py_BEGIN_ALLOW_THREADS
+                ret = SQLBindParameter(hndl->hstmt, (SQLUSMALLINT)(i + 1), SQL_PARAM_INPUT,
+                    info.nested[i].ValueType, info.nested[i].ParameterType,
+                    info.nested[i].ColumnSize, info.nested[i].DecimalDigits,
+                    info.nested + i, info.nested[i].BufferLength, &info.nested[i].StrLen_or_Ind);
+                Py_END_ALLOW_THREADS;
+                if (GetConnection(cur)->hdbc == SQL_NULL_HANDLE)
+                {
+                    // The connection was closed by another thread in the ALLOW_THREADS block above.
+                    RaiseErrorV(0, ProgrammingError, "The cursor's connection was closed.");
+                    return false;
+                }
+
+                if (!SQL_SUCCEEDED(ret))
+                {
+                    RaiseErrorFromHandle(cur->cnxn, "SQLBindParameter", GetConnection(cur)->hdbc, hndl->hstmt);
+                    return false;
+                }
+            }
+        }
+
+        ret = SQLSetStmtAttr(hndl->hstmt, SQL_SOPT_SS_PARAM_FOCUS, 0, SQL_IS_INTEGER);
+        if (!SQL_SUCCEEDED(ret))
+        {
+            RaiseErrorFromHandle(cur->cnxn, "SQLSetStmtAttr", GetConnection(cur)->hdbc, hndl->hstmt);
+            return false;
+        }
+
+        if (err)
+            return false;
+    }
+
+    return true;
+}
+
+
+
 bool BindParameter(Cursor* cur, Py_ssize_t index, ParamInfo& info)
 {
     SQLSMALLINT sqltype = info.ParameterType;
@@ -1170,7 +1341,9 @@ bool BindParameter(Cursor* cur, Py_ssize_t index, ParamInfo& info)
     sqltype = info.ParameterType;
     scale = info.DecimalDigits;
     }
-
+  //fprintf(stderr, "BIND: param=%ld ValueType=%d (%s) ParameterType=%d (%s) ColumnSize=%ld DecimalDigits=%d BufferLength=%ld (info.StrLen_or_Ind) *pcb=%ld\n",
+//		            (index+1), info.ValueType, CTypeName(info.ValueType), sqltype, SqlTypeName(sqltype), colsize,
+//			              scale, info.BufferLength, info.StrLen_or_Ind);
   TRACE("BIND: param=%ld ValueType=%d (%s) ParameterType=%d (%s) ColumnSize=%ld DecimalDigits=%d BufferLength=%ld *pcb=%ld\n",
           (index+1), info.ValueType, CTypeName(info.ValueType), sqltype, SqlTypeName(sqltype), colsize,
           scale, info.BufferLength, info.StrLen_or_Ind);
@@ -1197,6 +1370,7 @@ bool BindParameter(Cursor* cur, Py_ssize_t index, ParamInfo& info)
     // This is a TVP. Enter and bind its parameters, allocate descriptors for its columns (all as DAE)
     if (sqltype == SQL_SS_TABLE)
     {
+	//fprintf(stderr, "Not a Table\n");
         Py_ssize_t nrows = PySequence_Size(info.pObject);
         if (nrows > 0)
         {
@@ -1376,11 +1550,16 @@ bool Prepare(Cursor* cur, PyObject* pSql)
         TRACE("SQLPrepare(%s)\n", pch);
 
         Py_BEGIN_ALLOW_THREADS
-        if (isWide)
+        if (isWide) {
+	    fprintf(stderr, "PrepareW\n");
             ret = SQLPrepareW(cur->hstmt, (SQLWCHAR*)pch, cch);
-        else
+	} else { 
+	    fprintf(stderr, "Prepare\n");
             ret = SQLPrepare(cur->hstmt, (SQLCHAR*)pch, cch);
-        if (SQL_SUCCEEDED(ret))
+	}
+//RaiseErrorV(0, ProgrammingError, "You Called Prepare and now I am going to die.");
+  //               return false;	     
+	if (SQL_SUCCEEDED(ret))
         {
             szErrorFunc = "SQLNumParams";
             ret = SQLNumParams(cur->hstmt, &cParamsT);
@@ -1407,6 +1586,61 @@ bool Prepare(Cursor* cur, PyObject* pSql)
     }
     return true;
 }
+
+bool BindWithHandle(Cursor* cur, Handle *hndl, PyObject* original_params, bool skip_first)
+{
+    //
+    // Normalize the parameter variables.
+    //
+
+    // Since we may replace parameters (we replace objects with Py_True/Py_False when writing to a bit/bool column),
+    // allocate an array and use it instead of the original sequence
+
+    int        params_offset = skip_first ? 1 : 0;
+    Py_ssize_t cParams       = original_params == 0 ? 0 : PySequence_Length(original_params) - params_offset;
+    if (cParams != cur->paramcount)
+    {
+        RaiseErrorV(0, ProgrammingError, "The SQL contains %d parameter markers, but %d parameters were supplied",
+                    cur->paramcount, cParams);
+        return false;
+    }
+
+    cur->paramInfos = (ParamInfo*)PyMem_Malloc(sizeof(ParamInfo) * cParams);
+    if (cur->paramInfos == 0)
+    {
+        PyErr_NoMemory();
+        return 0;
+    }
+    memset(cur->paramInfos, 0, sizeof(ParamInfo) * cParams);
+
+    // Since you can't call SQLDesribeParam *after* calling SQLBindParameter, we'll loop through all of the
+    // GetParameterInfos first, then bind.
+
+    for (Py_ssize_t i = 0; i < cParams; i++)
+    {
+	//fprintf(stderr, "Binding\n");
+        Object param(PySequence_GetItem(original_params, i + params_offset));
+        if (!GetParameterInfo(cur, i, param, cur->paramInfos[i], false))
+        {
+            FreeInfos(cur->paramInfos, cParams);
+            cur->paramInfos = 0;
+            return false;
+        }
+    }
+
+    for (Py_ssize_t i = 0; i < cParams; i++)
+    {
+        if (!BindParameterWithHandle(cur, hndl, i, cur->paramInfos[i]))
+        {
+            FreeInfos(cur->paramInfos, cParams);
+            cur->paramInfos = 0;
+            return false;
+        }
+    }
+
+    return true;
+}
+
 
 
 bool Bind(Cursor* cur, PyObject* original_params, bool skip_first)
@@ -1440,6 +1674,7 @@ bool Bind(Cursor* cur, PyObject* original_params, bool skip_first)
 
     for (Py_ssize_t i = 0; i < cParams; i++)
     {
+	//fprintf(stderr, "Binding\n");
         Object param(PySequence_GetItem(original_params, i + params_offset));
         if (!GetParameterInfo(cur, i, param, cur->paramInfos[i], false))
         {

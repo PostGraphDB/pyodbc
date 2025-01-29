@@ -26,6 +26,8 @@
 #include <datetime.h>
 #include "handle.h"
 
+#include <stdio.h>
+
 enum
 {
     CURSOR_REQUIRE_CNXN    = 0x00000001,
@@ -711,13 +713,15 @@ static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* param
     {
         return 0;
     }
-
+            //return RaiseErrorV(0, PyExc_TypeError, "You called Prepare and now I am going to die");
     Py_INCREF(cur);
     Handle *hndl = Handle_New(cur);
     hndl->hstmt = cur->hstmt;
+    //fprintf(stderr, "There: %i", cur->hstmt)
     return (PyObject*)hndl;
 }
 
+#include <unistd.h>
 
 static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* params, bool skip_first)
 {
@@ -735,19 +739,29 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
 
     SQLRETURN ret = 0;
 
-         FreeParameterData(cur);
-    
-	 SQLCancelHandle(SQL_HANDLE_STMT, hndl->hstmt);
+    free_results(cur, KEEP_STATEMENT | KEEP_PREPARED);
+    FreeParameterData(cur);
+    SQLFreeStmt(hndl->hstmt, SQL_RESET_PARAMS);
+    SQLFreeStmt(hndl->hstmt, SQL_UNBIND);
+    SQLCloseCursor(hndl->hstmt);
+    //SQLCancelHandle(SQL_HANDLE_STMT, hndl->hstmt);
+    //fprintf(stderr, "Statment Handle %p Handle Id %i", hndl, *(int *)hndl->hstmt);
 
     const char* szLastFunction = "";
 
-    if (!Bind(cur, params, skip_first))
+    cur->hstmt = hndl->hstmt;
+    if (!BindWithHandle(cur, hndl, params, skip_first))
        return 0;
+//sleep(5);
 
-    szLastFunction = "SQLExecute";
+//return RaiseErrorV(0, PyExc_TypeError, "You called Bind and now i am going to die");
     Py_BEGIN_ALLOW_THREADS
     ret = SQLExecute(hndl->hstmt);
     Py_END_ALLOW_THREADS
+  
+    //fprintf(stderr, "SQLExecute: %i\n", ret);
+//sleep(5);
+//return RaiseErrorV(0, PyExc_TypeError, "You called execute and now i am going to die");
    
 
     if (cur->cnxn->hdbc == SQL_NULL_HANDLE)
@@ -787,27 +801,21 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
         Py_BEGIN_ALLOW_THREADS
         ret = SQLParamData(hndl->hstmt, (SQLPOINTER*)&pInfo);
         Py_END_ALLOW_THREADS
-
+        //fprintf(stderr, "paramdata\n");
         if (ret != SQL_NEED_DATA && ret != SQL_NO_DATA && !SQL_SUCCEEDED(ret))
             return RaiseErrorFromHandle(cur->cnxn, "SQLParamData", cur->cnxn->hdbc, hndl->hstmt);
 
         TRACE("SQLParamData() --> %d\n", ret);
 
-        if (ret == SQL_NEED_DATA)
-        {
+        if (ret == SQL_NEED_DATA) {
             szLastFunction = "SQLPutData";
-            if (pInfo->pObject && (PyBytes_Check(pInfo->pObject) || PyByteArray_Check(pInfo->pObject)
-            ))
-            {
+            if (pInfo->pObject && (PyBytes_Check(pInfo->pObject) || PyByteArray_Check(pInfo->pObject))) {
                 char *(*pGetPtr)(PyObject*);
                 Py_ssize_t (*pGetLen)(PyObject*);
-                if (PyByteArray_Check(pInfo->pObject))
-                {
+                if (PyByteArray_Check(pInfo->pObject)) {
                     pGetPtr = PyByteArray_AsString;
                     pGetLen = PyByteArray_Size;
-                }
-                else
-                {
+                } else {
                     pGetPtr = PyBytes_AsString;
                     pGetLen = PyBytes_Size;
                 }
@@ -818,6 +826,7 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
 
                 do
                 {
+			//fprintf(stderr, "do putdata\n");
                     SQLLEN remaining = pInfo->maxlength ? min(pInfo->maxlength, cb - offset) : cb;
                     TRACE("SQLPutData [%d] (%d) %.10s\n", offset, remaining, &p[offset]);
                     Py_BEGIN_ALLOW_THREADS
@@ -882,6 +891,7 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
             }
             else
             {
+		    //fprintf(stderr, "else putdata\n");
                 // TVP column sent as DAE
                 Py_BEGIN_ALLOW_THREADS
                 ret = SQLPutData(hndl->hstmt, pInfo->ParameterValuePtr, pInfo->BufferLength);
@@ -890,9 +900,12 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
                     return RaiseErrorFromHandle(cur->cnxn, "SQLPutData", cur->cnxn->hdbc, hndl->hstmt);
             }
             ret = SQL_NEED_DATA;
-        }
-    }
 
+        }
+
+    }
+    
+    //return RaiseErrorV(0, ProgrammingError, "fadsTHEREH");
     FreeParameterData(cur);
 
     if (ret == SQL_NO_DATA)
@@ -950,6 +963,9 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
         if (!create_name_map(cur, cCols, lowercase()))
             return 0;
     }
+
+//return RaiseErrorV(0, PyExc_TypeError, "You called executeCPreparedStatement and now i am going to die");
+   
 
     Py_INCREF(cur);
     return (PyObject*)cur;    
@@ -1352,8 +1368,8 @@ PyObject* Cursor_executePreparedStatement(PyObject* self, PyObject* args)
         skip_first = true;
     }
 
+    //fprintf(stderr, "Here: %i", ((Handle *)hndl)->hstmt);
     // Execute.
-
     return executePreparedStatement(cursor, (Handle *)hndl, params, skip_first);
 }
 
