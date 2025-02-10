@@ -1584,10 +1584,8 @@ bool Prepare(Cursor* cur, PyObject* pSql)
 
         Py_BEGIN_ALLOW_THREADS
         if (isWide) {
-	    fprintf(stderr, "PrepareW\n");
             ret = SQLPrepareW(cur->hstmt, (SQLWCHAR*)pch, cch);
 	} else { 
-	    fprintf(stderr, "Prepare\n");
             ret = SQLPrepare(cur->hstmt, (SQLCHAR*)pch, cch);
 	}
 //RaiseErrorV(0, ProgrammingError, "You Called Prepare and now I am going to die.");

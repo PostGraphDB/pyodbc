@@ -787,8 +787,6 @@ static bool GetUnicodeInfo1(Cursor* cur, Py_ssize_t index, PyObject* param, Para
     return true;
 }
 static bool first_run = true;
-//static void *vector_bind_ptr = NULL;
-//static int vector_bind_length = -1;
 static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* params, bool skip_first)
 {
 
@@ -848,14 +846,7 @@ PyObject *vector_bind_ptr1 = NULL;
         // Since you can't call SQLDesribeParam *after* calling SQLBindParameter, we'll loop through all of the
         // GetParameterInfos first, then bind.
 
-	    //fprintf(stderr, "Binding\n");
             PyObject *param = PySequence_GetItem(params, 0 + params_offset);
-            vector_bind_ptr = (PyObject *)_PyObject_NewVar(Py_TYPE(param), Py_SIZE(param));//(PyObject *)malloc(PyObject_Length(param));//(PyObject *)PyMem_Malloc(PyObject_Length(param));
-            //vector_bind_ptr1 = (PyObject *)malloc(PyObject_Length(param));//(PyObject *)PyMem_Malloc(PyObject_Length(param));
-            //Py_SET_SIZE((PyVarObject *)vector_bind_ptr, Py_SIZE(param));
-            //memcpy(vector_bind_ptr, param, sizeof(param));
-            //PyObject_CopyData(vector_bind_ptr, PySequence_GetItem(params, 0 + params_offset));
-            //memset(vector_bind_ptr, param, vector_bind_length)
             hndl->vector = malloc(sizeof(ParamInfo));
             if (!GetUnicodeInfo1(cur, 0, (PyObject *)param, cur->paramInfos[0], false, (ParamInfo *)hndl->vector))
             {
@@ -863,7 +854,6 @@ PyObject *vector_bind_ptr1 = NULL;
                 cur->paramInfos = 0;
                 return 0; //1 to 0
             }
-            //hndl->vector = NULL;
             
 
             if (!BindParameterWithHandle(cur, hndl, 0, cur->paramInfos[0], hndl->vector))
@@ -872,11 +862,6 @@ PyObject *vector_bind_ptr1 = NULL;
                 cur->paramInfos = 0;
                 return 0; //1 to 0
             }
-
-    //return true;  
-        //return 0;
-        //}
-
         first_run = false;
     } else {
             ParamInfo tmp;
@@ -890,31 +875,16 @@ PyObject *vector_bind_ptr1 = NULL;
 
             ParamInfo *pi = (ParamInfo * )hndl->vector;
             memcpy(pi->ParameterValuePtr, cur->paramInfos[0].ParameterValuePtr, cur->paramInfos[0].StrLen_or_Ind);
+            //pi->ParameterValuePtr = cur->paramInfos[0].ParameterValuePtr;
             pi->StrLen_or_Ind =  cur->paramInfos[0].StrLen_or_Ind;
             pi->BufferLength =  cur->paramInfos[0].BufferLength;
 
        }
 
-
-
-/*else {
-            ParamInfo pinfo = cur->paramInfos[0];
-			PyObject *param = PySequence_GetItem(params, 0 + params_offset);
-			GetParameterInfo(cur, 0 param, pinfo, false);
-            UpdateParamInfo(cur, 0, &pinfo);
-    }*/
-//sleep(5);
-
-//return RaiseErrorV(0, PyExc_TypeError, "You called Bind and now i am going to die");
     Py_BEGIN_ALLOW_THREADS
     ret = SQLExecute(hndl->hstmt);
     Py_END_ALLOW_THREADS
-  
-    //fprintf(stderr, "SQLExecute: %i\n", ret);
-//sleep(5);
-//return RaiseErrorV(0, PyExc_TypeError, "You called execute and now i am going to die");
    
-
     if (cur->cnxn->hdbc == SQL_NULL_HANDLE)
     {
         // The connection was closed by another thread in the ALLOW_THREADS block above.
