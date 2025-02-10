@@ -525,7 +525,7 @@ static int PyToCType(Cursor *cur, unsigned char **outbuf, PyObject *cell, ParamI
 
 static bool GetParamType(Cursor* cur, Py_ssize_t iParam, SQLSMALLINT& type);
 
-static void FreeInfos(ParamInfo* a, Py_ssize_t count)
+void FreeInfos(ParamInfo* a, Py_ssize_t count)
 {
     for (Py_ssize_t i = 0; i < count; i++)
     {
@@ -1041,7 +1041,39 @@ bool GetParameterInfo(Cursor* cur, Py_ssize_t index, PyObject* param, ParamInfo&
     if (PyUnicode_Check(param))
         return GetUnicodeInfo(cur, index, param, info, isTVP);
 
+   	if (param == Py_None)
+        return GetNullInfo(cur, index, info);
+
+    if (param == null_binary)
+        return GetNullBinaryInfo(cur, index, info);
+
+    if (PyBytes_Check(param))
+        return GetBytesInfo(cur, index, param, info, isTVP);
+
+    if (PyUnicode_Check(param))
+        return GetUnicodeInfo(cur, index, param, info, isTVP);
+
     if (PyBool_Check(param))
+        return GetBooleanInfo(cur, index, param, info);
+
+    if (PyDateTime_Check(param))
+        return GetDateTimeInfo(cur, index, param, info);
+
+    if (PyDate_Check(param))
+        return GetDateInfo(cur, index, param, info);
+
+    if (PyTime_Check(param))
+        return GetTimeInfo(cur, index, param, info);
+
+    if (PyLong_Check(param))
+        return GetLongInfo(cur, index, param, info, isTVP);
+
+    if (PyFloat_Check(param))
+        return GetFloatInfo(cur, index, param, info);
+
+    if (PyByteArray_Check(param))
+        return GetByteArrayInfo(cur, index, param, info, isTVP);
+ if (PyBool_Check(param))
         return GetBooleanInfo(cur, index, param, info);
 
     if (PyDateTime_Check(param))
@@ -1119,7 +1151,7 @@ static long getSequenceValue(PyObject *pSequence, Py_ssize_t nIndex, long nDefau
  *
  * sparhawk@gmx.at (Gerhard Gruber)
  */
-static bool UpdateParamInfo(Cursor* pCursor, Py_ssize_t nIndex, ParamInfo *pInfo)
+bool UpdateParamInfo(Cursor* pCursor, Py_ssize_t nIndex, ParamInfo *pInfo)
 {
   if (pCursor->inputsizes == NULL || nIndex >= PySequence_Length(pCursor->inputsizes))
     return false;
@@ -1164,8 +1196,9 @@ static bool UpdateParamInfo(Cursor* pCursor, Py_ssize_t nIndex, ParamInfo *pInfo
   return rc;
 }
 
-bool BindParameterWithHandle(Cursor* cur, Handle *hndl, Py_ssize_t index, ParamInfo& info)
+bool BindParameterWithHandle(Cursor* cur, Handle *hndl, Py_ssize_t index, ParamInfo& info, void *vector)
 {
+    ParamInfo *vectorPI = (ParamInfo *)vector;
     SQLSMALLINT sqltype = info.ParameterType;
     SQLULEN colsize = info.ColumnSize;
     SQLSMALLINT scale = info.DecimalDigits;
@@ -1187,7 +1220,7 @@ bool BindParameterWithHandle(Cursor* cur, Handle *hndl, Py_ssize_t index, ParamI
     SQLRETURN ret = -1;
     Py_BEGIN_ALLOW_THREADS
     ret = SQLBindParameter(hndl->hstmt, (SQLUSMALLINT)(index + 1), SQL_PARAM_INPUT,
-        info.ValueType, sqltype, colsize, scale, sqltype == SQL_SS_TABLE ? 0 : info.ParameterValuePtr, info.BufferLength, &info.StrLen_or_Ind);
+        info.ValueType, sqltype, colsize, scale, sqltype == SQL_SS_TABLE ? 0 : vectorPI->ParameterValuePtr, vectorPI->BufferLength, &vectorPI->StrLen_or_Ind);// info.BufferLength, &info.StrLen_or_Ind);
     Py_END_ALLOW_THREADS;
 
     if (GetConnection(cur)->hdbc == SQL_NULL_HANDLE)
@@ -1587,7 +1620,7 @@ bool Prepare(Cursor* cur, PyObject* pSql)
     return true;
 }
 
-bool BindWithHandle(Cursor* cur, Handle *hndl, PyObject* original_params, bool skip_first)
+bool BindWithHandle(Cursor* cur, Handle *hndl, PyObject* original_params, bool skip_first, void *vector)
 {
     //
     // Normalize the parameter variables.
@@ -1621,7 +1654,7 @@ bool BindWithHandle(Cursor* cur, Handle *hndl, PyObject* original_params, bool s
 	//fprintf(stderr, "Binding\n");
         Object param(PySequence_GetItem(original_params, i + params_offset));
         if (!GetParameterInfo(cur, i, param, cur->paramInfos[i], false))
-        {
+       {
             FreeInfos(cur->paramInfos, cParams);
             cur->paramInfos = 0;
             return false;
@@ -1630,7 +1663,7 @@ bool BindWithHandle(Cursor* cur, Handle *hndl, PyObject* original_params, bool s
 
     for (Py_ssize_t i = 0; i < cParams; i++)
     {
-        if (!BindParameterWithHandle(cur, hndl, i, cur->paramInfos[i]))
+        if (!BindParameterWithHandle(cur, hndl, i, cur->paramInfos[i], vector))
         {
             FreeInfos(cur->paramInfos, cParams);
             cur->paramInfos = 0;
@@ -1744,7 +1777,7 @@ bool PrepareAndBind(Cursor* cur, PyObject* pSql, PyObject* original_params, bool
 
     for (Py_ssize_t i = 0; i < cParams; i++)
     {
-        if (!BindParameter(cur, i, cur->paramInfos[i]))
+        if (BindParameter(cur, i, cur->paramInfos[i]))
         {
             FreeInfos(cur->paramInfos, cParams);
             cur->paramInfos = 0;

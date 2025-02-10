@@ -16,5 +16,8 @@ bool ExecuteMulti(Cursor* cur, PyObject* pSql, PyObject* paramArrayObj);
 bool GetParameterInfo(Cursor* cur, Py_ssize_t index, PyObject* param, ParamInfo& info, bool isTVP);
 void FreeParameterData(Cursor* cur);
 void FreeParameterInfo(Cursor* cur);
+bool UpdateParamInfo(Cursor* pCursor, Py_ssize_t nIndex, ParamInfo *pInfo);
+bool BindParameterWithHandle(Cursor* cur, Handle *hndl, Py_ssize_t index, ParamInfo& info, void *vector);
+void FreeInfos(ParamInfo* a, Py_ssize_t count);
 
 #endif

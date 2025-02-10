@@ -24,6 +24,8 @@ struct Handle
 
     // Set to SQL_NULL_HANDLE when the cursor is closed.
     HSTMT hstmt;
+
+    void *vector;
 };
 
 void Handle_init();

@@ -402,7 +402,7 @@ static void closeimpl(Cursor* cur)
     //
     // This method releases the GIL lock while closing, so verify the HDBC still exists if you use it.
 
-    free_results(cur, FREE_STATEMENT | FREE_PREPARED);
+    free_results(cur, FREE_STATEMENT | KEEP_PREPARED);
 
     FreeParameterData(cur);
     FreeParameterInfo(cur);
@@ -717,12 +717,78 @@ static PyObject * prepare_statement(Cursor* cur, PyObject* pSql, PyObject* param
     Py_INCREF(cur);
     Handle *hndl = Handle_New(cur);
     hndl->hstmt = cur->hstmt;
+    hndl->vector = NULL;
     //fprintf(stderr, "There: %i", cur->hstmt)
     return (PyObject*)hndl;
 }
 
 #include <unistd.h>
+static bool GetUnicodeInfo1(Cursor* cur, Py_ssize_t index, PyObject* param, ParamInfo& info, bool isTVP, ParamInfo *vector){
 
+    const TextEnc& enc = cur->cnxn->unicode_enc;
+
+    info.ValueType = enc.ctype;
+
+    Object encoded(PyCodec_Encode(param, enc.name, "strict"));
+    if (!encoded)
+        return false;
+
+    if (enc.optenc == OPTENC_NONE && !PyBytes_CheckExact(encoded))
+    {
+        PyErr_Format(PyExc_TypeError, "Unicode write encoding '%s' returned unexpected data type: %s",
+                     enc.name, encoded.Get()->ob_type->tp_name);
+        return false;
+    }
+
+    Py_ssize_t cb = PyBytes_GET_SIZE(encoded);
+
+    int denom = 1;
+
+    if (enc.optenc == OPTENC_UTF16)
+    {
+        denom = 2;
+    }
+    else if (enc.optenc == OPTENC_UTF32)
+    {
+        denom = 4;
+    }
+
+    info.ColumnSize = isTVP ? 0 : (SQLUINTEGER)max(cb / denom, 1);
+
+    info.pObject = encoded.Detach();
+
+    SQLLEN maxlength = cur->cnxn->GetMaxLength(enc.ctype);
+
+    if (maxlength == 0 || cb <= maxlength || isTVP)
+    {
+        info.ParameterType     = (enc.ctype == SQL_C_CHAR) ? SQL_VARCHAR : SQL_WVARCHAR;
+        info.ParameterValuePtr = PyBytes_AS_STRING(info.pObject);
+        info.BufferLength      = (SQLINTEGER)cb;
+        info.StrLen_or_Ind     = (SQLINTEGER)cb;
+    }
+    else
+    {
+        // Too long to pass all at once, so we'll provide the data at execute.
+        info.ParameterType     = (enc.ctype == SQL_C_CHAR) ? SQL_LONGVARCHAR : SQL_WLONGVARCHAR;
+        info.ParameterValuePtr = &info;
+        info.BufferLength      = sizeof(ParamInfo*);
+        info.StrLen_or_Ind     = cur->cnxn->need_long_data_len ? SQL_LEN_DATA_AT_EXEC((SQLINTEGER)cb) : SQL_DATA_AT_EXEC;
+        info.maxlength = maxlength;
+    }
+    //vector = (void *)&info;
+  
+        vector->ParameterType = info.ParameterType;
+        vector->ParameterValuePtr = info.ParameterValuePtr;
+        vector->BufferLength = info.BufferLength;
+        vector->StrLen_or_Ind = info.StrLen_or_Ind;
+        vector->maxlength = info.maxlength;
+    
+//Py_INCREF(info);
+    return true;
+}
+static bool first_run = true;
+//static void *vector_bind_ptr = NULL;
+//static int vector_bind_length = -1;
 static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* params, bool skip_first)
 {
 
@@ -739,19 +805,104 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
 
     SQLRETURN ret = 0;
 
-    free_results(cur, KEEP_STATEMENT | KEEP_PREPARED);
-    FreeParameterData(cur);
-    SQLFreeStmt(hndl->hstmt, SQL_RESET_PARAMS);
+    //free_results(cur, KEEP_STATEMENT | KEEP_PREPARED);
+    //FreeParameterData(cur);
+    //SQLFreeStmt(hndl->hstmt, SQL_RESET_PARAMS);
     SQLFreeStmt(hndl->hstmt, SQL_UNBIND);
-    SQLCloseCursor(hndl->hstmt);
+    SQLFreeStmt(hndl->hstmt, SQL_CLOSE);        
+//SQLCloseCursor(hndl->hstmt);
     //SQLCancelHandle(SQL_HANDLE_STMT, hndl->hstmt);
     //fprintf(stderr, "Statment Handle %p Handle Id %i", hndl, *(int *)hndl->hstmt);
 
     const char* szLastFunction = "";
 
     cur->hstmt = hndl->hstmt;
-    if (!BindWithHandle(cur, hndl, params, skip_first))
-       return 0;
+    if (first_run) {
+        //if (!BindWithHandle(cur, hndl, params, skip_first)) {
+             //
+        // Normalize the parameter variables.
+        //
+PyObject *vector_bind_ptr;
+int vector_bind_length;
+PyObject *vector_bind_ptr1 = NULL;
+
+        // Since we may replace parameters (we replace objects with Py_True/Py_False when writing to a bit/bool column),
+        // allocate an array and use it instead of the original sequence
+
+        int       params_offset = skip_first ? 1 : 0;
+        Py_ssize_t cParams       = params == 0 ? 0 : PySequence_Length(params) - params_offset;
+        if (cParams != cur->paramcount)
+        {
+            //RaiseErrorV(0, ProgrammingError, "The SQL contains %d parameter markers, but %d parameters were supplied",
+              //      cur->paramcount, cParams);
+            return 0; //1 to 0
+        }
+
+        cur->paramInfos = (ParamInfo*)PyMem_Malloc(sizeof(ParamInfo) * cParams);
+        if (cur->paramInfos == 0)
+        {
+            PyErr_NoMemory();
+            return 0;
+        }
+        memset(cur->paramInfos, 0, sizeof(ParamInfo) * cParams);
+        // Since you can't call SQLDesribeParam *after* calling SQLBindParameter, we'll loop through all of the
+        // GetParameterInfos first, then bind.
+
+	    //fprintf(stderr, "Binding\n");
+            PyObject *param = PySequence_GetItem(params, 0 + params_offset);
+            vector_bind_ptr = (PyObject *)_PyObject_NewVar(Py_TYPE(param), Py_SIZE(param));//(PyObject *)malloc(PyObject_Length(param));//(PyObject *)PyMem_Malloc(PyObject_Length(param));
+            //vector_bind_ptr1 = (PyObject *)malloc(PyObject_Length(param));//(PyObject *)PyMem_Malloc(PyObject_Length(param));
+            //Py_SET_SIZE((PyVarObject *)vector_bind_ptr, Py_SIZE(param));
+            //memcpy(vector_bind_ptr, param, sizeof(param));
+            //PyObject_CopyData(vector_bind_ptr, PySequence_GetItem(params, 0 + params_offset));
+            //memset(vector_bind_ptr, param, vector_bind_length)
+            hndl->vector = malloc(sizeof(ParamInfo));
+            if (!GetUnicodeInfo1(cur, 0, (PyObject *)param, cur->paramInfos[0], false, (ParamInfo *)hndl->vector))
+            {
+                FreeInfos(cur->paramInfos, cParams);
+                cur->paramInfos = 0;
+                return 0; //1 to 0
+            }
+            //hndl->vector = NULL;
+            
+
+            if (!BindParameterWithHandle(cur, hndl, 0, cur->paramInfos[0], hndl->vector))
+            {
+                FreeInfos(cur->paramInfos, cParams);
+                cur->paramInfos = 0;
+                return 0; //1 to 0
+            }
+
+    //return true;  
+        //return 0;
+        //}
+
+        first_run = false;
+    } else {
+            ParamInfo tmp;
+            PyObject *param = PySequence_GetItem(params, 0 + params_offset);
+            if (!GetUnicodeInfo1(cur, 0, (PyObject *)param, cur->paramInfos[0], false, &tmp))
+            {
+                FreeInfos(cur->paramInfos, cParams);
+                cur->paramInfos = 0;
+                return 0; //1 to 0
+            }
+
+            ParamInfo *pi = (ParamInfo * )hndl->vector;
+            memcpy(pi->ParameterValuePtr, cur->paramInfos[0].ParameterValuePtr, cur->paramInfos[0].StrLen_or_Ind);
+            pi->StrLen_or_Ind =  cur->paramInfos[0].StrLen_or_Ind;
+            pi->BufferLength =  cur->paramInfos[0].BufferLength;
+
+       }
+
+
+
+/*else {
+            ParamInfo pinfo = cur->paramInfos[0];
+			PyObject *param = PySequence_GetItem(params, 0 + params_offset);
+			GetParameterInfo(cur, 0 param, pinfo, false);
+            UpdateParamInfo(cur, 0, &pinfo);
+    }*/
 //sleep(5);
 
 //return RaiseErrorV(0, PyExc_TypeError, "You called Bind and now i am going to die");
@@ -826,7 +977,7 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
 
                 do
                 {
-			//fprintf(stderr, "do putdata\n");
+                    //fprintf(stderr, "do putdata\n");
                     SQLLEN remaining = pInfo->maxlength ? min(pInfo->maxlength, cb - offset) : cb;
                     TRACE("SQLPutData [%d] (%d) %.10s\n", offset, remaining, &p[offset]);
                     Py_BEGIN_ALLOW_THREADS
@@ -891,7 +1042,7 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
             }
             else
             {
-		    //fprintf(stderr, "else putdata\n");
+            //fprintf(stderr, "else putdata\n");
                 // TVP column sent as DAE
                 Py_BEGIN_ALLOW_THREADS
                 ret = SQLPutData(hndl->hstmt, pInfo->ParameterValuePtr, pInfo->BufferLength);
@@ -906,7 +1057,7 @@ static PyObject* executePreparedStatement(Cursor* cur, Handle *hndl, PyObject* p
     }
     
     //return RaiseErrorV(0, ProgrammingError, "fadsTHEREH");
-    FreeParameterData(cur);
+    //FreeParameterData(cur);
 
     if (ret == SQL_NO_DATA)
     {
